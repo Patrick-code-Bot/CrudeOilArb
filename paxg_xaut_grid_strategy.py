@@ -586,6 +586,12 @@ class PaxgXautGridStrategy(Strategy):
                     f"Updating notional from portfolio."
                 )
                 self._update_notional_from_portfolio()
+            else:
+                # Close orders are NOT added to working_orders, so they also reach here.
+                # Without this call the paired_close_orders tracker is never updated,
+                # grid state is never cleared, and _check_close_order_timeouts() retries
+                # indefinitely every 5 seconds.
+                self._handle_close_order_fill(event)
             return
 
         # 更新配对订单追踪器，检查是否两边都成交了
