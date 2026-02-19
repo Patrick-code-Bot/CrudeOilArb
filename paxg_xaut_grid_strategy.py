@@ -178,6 +178,13 @@ class PaxgXautGridStrategy(Strategy):
         # Reconciliation interval (60 seconds)
         self._reconciliation_interval_ns: int = 60_000_000_000
 
+        # Last rebalance timestamp and cooldown (prevent rebalancing on every tick)
+        self._last_rebalance_ns: int = 0
+        self._rebalance_cooldown_ns: int = 60_000_000_000  # 60 seconds between rebalances
+
+        # Track rebalance correction order IDs so fill/reject/cancel events are handled
+        self._rebalance_order_ids: set = set()
+
     # ========== 生命周期 ==========
     def on_start(self) -> None:
         self.log.info(
@@ -437,6 +444,16 @@ class PaxgXautGridStrategy(Strategy):
         self.log.warning(f"Order rejected: {event.client_order_id}, reason: {event.reason}")
         self.working_orders.pop(event.client_order_id, None)
 
+        # Rebalance correction orders are tracked separately
+        if event.client_order_id in self._rebalance_order_ids:
+            self._rebalance_order_ids.discard(event.client_order_id)
+            self.log.warning(
+                f"Rebalance correction order rejected: {event.client_order_id}, "
+                f"reason: {event.reason}. Cooldown reset so next tick retries."
+            )
+            self._last_rebalance_ns = 0  # Retry on next reconciliation/tick
+            return
+
         # 检查是否是配对订单中的一个被拒绝
         # 如果是，需要检查另一侧是否已成交，如果成交了需要平仓
         self._handle_order_failure(event.client_order_id, "rejected")
@@ -444,6 +461,9 @@ class PaxgXautGridStrategy(Strategy):
     def on_order_canceled(self, event) -> None:
         self.log.debug(f"Order canceled: {event.client_order_id}")
         self.working_orders.pop(event.client_order_id, None)
+        if event.client_order_id in self._rebalance_order_ids:
+            self._rebalance_order_ids.discard(event.client_order_id)
+            self.log.warning(f"Rebalance correction order canceled: {event.client_order_id}")
 
     # ========== 仓位事件处理 (NautilusTrader内置) ==========
     def on_position_opened(self, event) -> None:
@@ -473,18 +493,36 @@ class PaxgXautGridStrategy(Strategy):
         self._update_notional_from_portfolio()
 
     def _update_notional_from_portfolio(self) -> None:
-        """Update total_notional based on actual portfolio positions"""
+        """Update total_notional based on actual portfolio positions.
+
+        Uses portfolio.net_exposure() which correctly aggregates EXTERNAL
+        (reconciled) and internal positions for the same instrument, avoiding
+        the double-counting that occurs when both coexist during reconciliation.
+        """
         try:
             paxg_notional = 0.0
             xaut_notional = 0.0
-            
-            # Calculate from open positions
-            for pos in self.cache.positions_open():
-                if pos.instrument_id == self.paxg_id:
-                    paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
-                elif pos.instrument_id == self.xaut_id:
-                    xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
-            
+
+            # portfolio.net_exposure() returns the true aggregate signed exposure
+            # (negative = short, positive = long) across ALL positions including EXTERNAL.
+            try:
+                paxg_exp = self.portfolio.net_exposure(self.paxg_id)
+                xaut_exp = self.portfolio.net_exposure(self.xaut_id)
+                if paxg_exp is not None:
+                    paxg_notional = abs(float(paxg_exp))
+                if xaut_exp is not None:
+                    xaut_notional = abs(float(xaut_exp))
+            except Exception as e:
+                self.log.warning(
+                    f"net_exposure() failed ({e}), falling back to position iteration"
+                )
+                # Fallback: sum all open positions per instrument
+                for pos in self.cache.positions_open():
+                    if pos.instrument_id == self.paxg_id:
+                        paxg_notional += float(pos.quantity) * float(pos.avg_px_open)
+                    elif pos.instrument_id == self.xaut_id:
+                        xaut_notional += float(pos.quantity) * float(pos.avg_px_open)
+
             new_total = paxg_notional + xaut_notional
             if abs(new_total - self.total_notional) > 1.0:  # Only log if significant change
                 self.log.info(
@@ -540,6 +578,14 @@ class PaxgXautGridStrategy(Strategy):
         level, leg = self.working_orders.pop(event.client_order_id, (None, None))
 
         if level is None:
+            # Check if this is a rebalance correction order fill
+            if event.client_order_id in self._rebalance_order_ids:
+                self._rebalance_order_ids.discard(event.client_order_id)
+                self.log.info(
+                    f"Rebalance correction order filled: {event.client_order_id}. "
+                    f"Updating notional from portfolio."
+                )
+                self._update_notional_from_portfolio()
             return
 
         # 更新配对订单追踪器，检查是否两边都成交了
@@ -679,12 +725,22 @@ class PaxgXautGridStrategy(Strategy):
             if not self._grid_has_position(state):
                 continue
 
-            prev_level = 0.0 if i == 0 else levels_sorted[i - 1]
+            # For the first grid level there is no lower neighbour, so close when the
+            # spread retracts to half of that level's own threshold (e.g. 0.05% for the
+            # 0.10% level).  Using 0.0 as the floor was a bug: abs_spread < 0.0 is
+            # mathematically impossible and the first level would never close.
+            if i == 0:
+                prev_level = levels_sorted[0] / 2.0
+            else:
+                prev_level = levels_sorted[i - 1]
             if abs_spread < prev_level:
                 self.log.info(f"Closing grid level={level}, spread={spread:.4%}")
                 self._close_grid(level, state)
 
         # 2) 再处理"开仓条件"：spread 超过某档且该档没有持仓/待处理订单 -> 开新对冲
+        # Limit to 1 new grid open per tick to prevent rate-limit bursts when the
+        # strategy starts and spread already exceeds many levels simultaneously.
+        new_grids_opened = 0
         for i, level in enumerate(levels_sorted):
             state = self.grid_state[level]
             # 检查是否已有持仓
@@ -696,6 +752,10 @@ class PaxgXautGridStrategy(Strategy):
                 continue
 
             if abs_spread > level:
+                # Only open 1 new grid per tick; subsequent levels wait for the next tick
+                if new_grids_opened >= 1:
+                    break
+
                 # 检查总风险（包括已成交和待成交的订单）
                 notional = self._get_level_notional(level)
                 total_exposure = self.total_notional + self.pending_notional + 2 * notional
@@ -708,6 +768,7 @@ class PaxgXautGridStrategy(Strategy):
 
                 self.log.info(f"Opening grid level={level}, spread={spread:.4%}")
                 self._open_grid(level, spread)
+                new_grids_opened += 1
 
     def _grid_has_position(self, state: GridPositionState) -> bool:
         return (state.paxg_pos_id is not None) or (state.xaut_pos_id is not None)
@@ -933,26 +994,69 @@ class PaxgXautGridStrategy(Strategy):
     # ========== Rebalance ==========
     def _rebalance_if_needed(self) -> None:
         """
-        这里可以做一个简单的 rebalance：
-        - 计算当前所有 PAXG 名义 vs XAUT 名义
-        - 差值超过 threshold 时，通过微小挂单校正
+        Corrects leg imbalance between PAXG and XAUT positions.
+
+        When one leg has more notional exposure than the other (beyond
+        rebalance_threshold_bps), submits a single market order to add to the
+        lagging leg, bringing both legs back to equal notional.
+
+        A 60-second cooldown prevents submitting correction orders on every tick.
         """
-        paxg_notional = 0.0
-        xaut_notional = 0.0
+        # --- Measure current leg notionals via portfolio.net_exposure() ---
+        # Using net_exposure() avoids double-counting when NautilusTrader holds both
+        # EXTERNAL (reconciled) and internal positions simultaneously for the same instrument.
+        # The sign of net_exposure tells us the direction: positive = long, negative = short.
+        paxg_side: Optional[OrderSide] = None
+        xaut_side: Optional[OrderSide] = None
 
-        for pos in self.cache.positions():
-            if pos.instrument_id == self.paxg_id:
-                paxg_notional += pos.quantity * self._mid_price(self.paxg_bid, self.paxg_ask)
-            elif pos.instrument_id == self.xaut_id:
-                xaut_notional += pos.quantity * self._mid_price(self.xaut_bid, self.xaut_ask)
+        paxg_price = self._mid_price(self.paxg_bid, self.paxg_ask)
+        xaut_price = self._mid_price(self.xaut_bid, self.xaut_ask)
 
-        if paxg_notional == 0 and xaut_notional == 0:
+        try:
+            paxg_exp_raw = self.portfolio.net_exposure(self.paxg_id)
+            xaut_exp_raw = self.portfolio.net_exposure(self.xaut_id)
+            paxg_exp_val = float(paxg_exp_raw) if paxg_exp_raw is not None else 0.0
+            xaut_exp_val = float(xaut_exp_raw) if xaut_exp_raw is not None else 0.0
+        except Exception as e:
+            self.log.warning(f"Rebalance: net_exposure() failed ({e}), skipping")
+            return
+
+        # Fallback: if portfolio.net_exposure() returned 0 for both legs,
+        # scan cache.positions_open() directly.  Bybit external positions are
+        # not always reported through the NautilusTrader portfolio API, which
+        # would cause the rebalance to silently skip even when real imbalance exists.
+        if paxg_exp_val == 0.0 and xaut_exp_val == 0.0:
+            self.log.debug(
+                "portfolio.net_exposure() returned 0 for both legs; "
+                "falling back to cache.positions_open() scan"
+            )
+            for pos in self.cache.positions_open():
+                sign = 1.0 if pos.is_long else -1.0
+                if pos.instrument_id == self.paxg_id and paxg_price is not None:
+                    paxg_exp_val += sign * float(pos.quantity) * paxg_price
+                elif pos.instrument_id == self.xaut_id and xaut_price is not None:
+                    xaut_exp_val += sign * float(pos.quantity) * xaut_price
+
+        paxg_notional = abs(paxg_exp_val)
+        xaut_notional = abs(xaut_exp_val)
+
+        # Infer direction from exposure sign
+        if paxg_exp_val > 0:
+            paxg_side = OrderSide.BUY   # long PAXG
+        elif paxg_exp_val < 0:
+            paxg_side = OrderSide.SELL  # short PAXG
+        if xaut_exp_val > 0:
+            xaut_side = OrderSide.BUY   # long XAUT
+        elif xaut_exp_val < 0:
+            xaut_side = OrderSide.SELL  # short XAUT
+
+        if paxg_notional == 0.0 and xaut_notional == 0.0:
             return
 
         delta = paxg_notional - xaut_notional
         base = max(abs(paxg_notional), abs(xaut_notional), 1.0)
-
         imbalance = abs(delta) / base
+
         if imbalance < self.config.rebalance_threshold_bps / 10_000.0:
             return
 
@@ -961,9 +1065,85 @@ class PaxgXautGridStrategy(Strategy):
             f"xaut_notional={xaut_notional:.2f}, imbalance={imbalance:.4%}"
         )
 
-        # 简单方式：用市价或近似 limit 做一个微小反向单
-        # 后续可以根据实际需求做精细实现
-        pass
+        # --- Cooldown: only act once per 60 seconds ---
+        current_time = self.clock.timestamp_ns()
+        if current_time - self._last_rebalance_ns < self._rebalance_cooldown_ns:
+            self.log.debug("Rebalance cooldown active, skipping order submission")
+            return
+
+        # --- Identify the lagging leg and build correction order ---
+        correction_notional = abs(delta)
+
+        if paxg_notional > xaut_notional:
+            # XAUT is the lagging leg: add to XAUT in the same direction as existing XAUT.
+            # Infer direction from PAXG side when no XAUT position exists yet
+            # (spread > 0 → SHORT PAXG / LONG XAUT → XAUT correction is BUY).
+            if xaut_side is not None:
+                correction_side = xaut_side
+            elif paxg_side == OrderSide.SELL:
+                correction_side = OrderSide.BUY   # PAXG short → XAUT should be long
+            else:
+                correction_side = OrderSide.SELL  # PAXG long → XAUT should be short
+            if xaut_price is None:
+                return
+            qty = correction_notional / xaut_price
+            # Pre-check BEFORE make_qty: it raises ValueError when qty rounds to zero
+            if qty < float(self.xaut.size_increment):
+                self.log.info(
+                    f"Rebalance correction too small ({correction_notional:.2f} USDT "
+                    f"→ {qty:.8f} XAUT < min {float(self.xaut.size_increment):.4f}), skipping"
+                )
+                self._last_rebalance_ns = current_time
+                return
+            order = self.order_factory.market(
+                instrument_id=self.xaut_id,
+                order_side=correction_side,
+                quantity=self.xaut.make_qty(qty),
+            )
+            leg_name = "XAUT"
+        else:
+            # PAXG is the lagging leg: add to PAXG in the same direction as existing PAXG.
+            if paxg_side is not None:
+                correction_side = paxg_side
+            elif xaut_side == OrderSide.BUY:
+                correction_side = OrderSide.SELL  # XAUT long → PAXG should be short
+            else:
+                correction_side = OrderSide.BUY   # XAUT short → PAXG should be long
+            if paxg_price is None:
+                return
+            qty = correction_notional / paxg_price
+            # Pre-check BEFORE make_qty: it raises ValueError when qty rounds to zero
+            if qty < float(self.paxg.size_increment):
+                self.log.info(
+                    f"Rebalance correction too small ({correction_notional:.2f} USDT "
+                    f"→ {qty:.8f} PAXG < min {float(self.paxg.size_increment):.4f}), skipping"
+                )
+                self._last_rebalance_ns = current_time
+                return
+            order = self.order_factory.market(
+                instrument_id=self.paxg_id,
+                order_side=correction_side,
+                quantity=self.paxg.make_qty(qty),
+            )
+            leg_name = "PAXG"
+
+        # Safety guard (make_qty already validated; this handles any remaining edge cases)
+        if float(order.quantity) == 0.0:
+            self.log.warning(
+                f"Rebalance correction too small to trade "
+                f"({correction_notional:.2f} USDT rounds to 0 qty), skipping"
+            )
+            self._last_rebalance_ns = current_time
+            return
+
+        self.submit_order(order)
+        self._rebalance_order_ids.add(order.client_order_id)  # Track for fill/reject/cancel handling
+        self._last_rebalance_ns = current_time
+        self.log.info(
+            f"Submitted rebalance order: {leg_name} {correction_side.name} "
+            f"qty={float(order.quantity):.6f} "
+            f"(correction={correction_notional:.2f} USDT, imbalance={imbalance:.4%})"
+        )
 
     # ========== Position Reconciliation (FIX #4) ==========
     def _should_reconcile(self) -> bool:
@@ -1007,14 +1187,21 @@ class PaxgXautGridStrategy(Strategy):
             )
             self.total_notional = actual_total
 
-            # Also check for imbalance
-            if actual_total > 0:
-                imbalance = abs(actual_paxg_notional - actual_xaut_notional) / actual_total
-                if imbalance > 0.20:  # 20% imbalance
-                    self.log.error(
-                        f"🚨 CRITICAL IMBALANCE: {imbalance*100:.2f}% "
-                        f"(PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f})"
-                    )
+        # Always check per-leg imbalance, even when the total notional is not drifting.
+        # A stable total with one oversized leg (e.g. PAXG=600, XAUT=300) would never
+        # be caught by the diff > 100 check above, so we test independently here.
+        if actual_total > 0:
+            imbalance = abs(actual_paxg_notional - actual_xaut_notional) / actual_total
+            if imbalance > 0.20:  # 20% imbalance
+                self.log.error(
+                    f"🚨 CRITICAL IMBALANCE: {imbalance*100:.2f}% "
+                    f"(PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f}). "
+                    f"Forcing immediate rebalance correction."
+                )
+                # Reset the rebalance cooldown so _rebalance_if_needed() fires on
+                # the very next call (it is invoked right after this method returns
+                # in on_quote_tick(), so the correction order is submitted this tick).
+                self._last_rebalance_ns = 0
 
     def _get_actual_position_notional(self, instrument_id: InstrumentId) -> float:
         """Get actual position notional from cache for a specific instrument."""
