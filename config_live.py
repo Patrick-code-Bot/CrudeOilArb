@@ -7,7 +7,7 @@ from pathlib import Path
 
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig, BybitExecClientConfig
 from nautilus_trader.adapters.bybit.factories import BybitLiveDataClientFactory, BybitLiveExecClientFactory
-from nautilus_trader.core.nautilus_pyo3 import BybitProductType
+# from nautilus_trader.core.nautilus_pyo3 import BybitProductType  # REMOVED: Not compatible with current version
 from nautilus_trader.config import (
     InstrumentProviderConfig,
     LiveExecEngineConfig,
@@ -137,7 +137,7 @@ def create_live_config() -> TradingNodeConfig:
             load_all=True,
             load_ids=None,
         ),
-        product_types=[BybitProductType.LINEAR],  # Trading linear perpetuals (PAXG/XAUT)
+        # product_types=[BybitProductType.LINEAR],  # REMOVED: Causing TypeError with current NautilusTrader version
         testnet=False,  # Set to True for testnet
         # Using One-Way Mode (default) - position mode must be set on Bybit exchange to match
     )

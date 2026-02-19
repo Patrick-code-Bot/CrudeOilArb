@@ -129,7 +129,9 @@ def signal_handler(sig, frame):
     print("Shutdown signal received. Stopping trading node...")
     print("=" * 80)
     if trading_node:
-        asyncio.create_task(trading_node.stop())
+        # Note: Graceful shutdown is handled in the finally block of main()
+        # Simply exit here and let the cleanup happen naturally
+        pass
     sys.exit(0)
 
 
