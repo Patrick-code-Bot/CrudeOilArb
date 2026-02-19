@@ -80,6 +80,19 @@ class PaxgXautGridConfig(StrategyConfig, frozen=True):
     # 极端价差风控：超过该值（例如 1.5%）全平并暂停策略
     extreme_spread_stop: float = 0.015  # 1.5%
 
+    # Minimum net profit (USDT) required before closing a grid level.
+    # Net P&L is calculated as: gross unrealized P&L - round-trip taker fees.
+    # Set to 0.0 to disable the check (close whenever spread reverts).
+    min_profit_usdt: float = 0.0
+
+    # Bybit taker fee rate used for net P&L estimation (default 0.055%).
+    # Used in: round-trip fee = open_notional * taker_fee_rate * 2
+    taker_fee_rate: float = 0.00055
+
+    # Bybit minimum order notional value (USDT). Orders below this are rejected by
+    # the exchange.  Used to pre-screen rebalance correction orders before submission.
+    min_order_notional_usdt: float = 5.0
+
     # 是否在启动时自动订阅行情
     auto_subscribe: bool = True
 
@@ -449,9 +462,11 @@ class PaxgXautGridStrategy(Strategy):
             self._rebalance_order_ids.discard(event.client_order_id)
             self.log.warning(
                 f"Rebalance correction order rejected: {event.client_order_id}, "
-                f"reason: {event.reason}. Cooldown reset so next tick retries."
+                f"reason: {event.reason}. Enforcing full cooldown before retry."
             )
-            self._last_rebalance_ns = 0  # Retry on next reconciliation/tick
+            # Enforce the full 60-second cooldown so the loop doesn't
+            # hammer Bybit with a rejected order on every quote tick.
+            self._last_rebalance_ns = self.clock.timestamp_ns()
             return
 
         # 检查是否是配对订单中的一个被拒绝
@@ -871,12 +886,20 @@ class PaxgXautGridStrategy(Strategy):
         self.pending_notional += 2 * notional
         self.log.debug(f"Added {2*notional:.2f} to pending_notional, now pending={self.pending_notional:.2f}")
 
-    def _close_grid(self, level: float, state: GridPositionState) -> None:
+    def _close_grid(self, level: float, state: GridPositionState, force: bool = False) -> None:
         """
         Close grid position with paired order tracking.
 
         FIX #2: Track close orders to detect partial closes and prevent imbalance.
         Don't clear position IDs or reduce notional until both orders fill.
+
+        Args:
+            level: Grid level to close.
+            state: Current GridPositionState for this level.
+            force: When True, bypass the min_profit_usdt check.
+                   Used for emergency closes (_close_all_grids) and close retries
+                   (_check_close_order_timeouts) where the close must proceed
+                   regardless of profitability.
         """
         # Check if position exists
         if state.paxg_pos_id is None and state.xaut_pos_id is None:
@@ -888,6 +911,26 @@ class PaxgXautGridStrategy(Strategy):
             if tracker.level == level:
                 self.log.debug(f"Already closing grid level={level}, skipping")
                 return
+
+        # Minimum net profit check (skipped when force=True, e.g. emergency stop / retry)
+        if not force and self.config.min_profit_usdt > 0:
+            net_pnl = self._estimate_net_pnl(level, state)
+            if net_pnl is None:
+                # Could not determine P&L (position not in cache) — allow close
+                self.log.debug(
+                    f"Grid level={level:.4f}: P&L estimate unavailable, proceeding with close"
+                )
+            elif net_pnl < self.config.min_profit_usdt:
+                self.log.info(
+                    f"Grid level={level:.4f} ({level*100:.2f}%) close SKIPPED: "
+                    f"net_pnl={net_pnl:.4f} USDT < min_profit={self.config.min_profit_usdt} USDT"
+                )
+                return
+            else:
+                self.log.info(
+                    f"Grid level={level:.4f} ({level*100:.2f}%) close APPROVED: "
+                    f"net_pnl={net_pnl:.4f} USDT >= min_profit={self.config.min_profit_usdt} USDT"
+                )
 
         # Submit close orders
         paxg_order = None
@@ -932,8 +975,9 @@ class PaxgXautGridStrategy(Strategy):
         # Wait for both orders to fill (handled in on_order_filled)
 
     def _close_all_grids(self) -> None:
+        # force=True: extreme-spread emergency stop must close regardless of P&L
         for level, state in self.grid_state.items():
-            self._close_grid(level, state)
+            self._close_grid(level, state, force=True)
 
     def _close_position(self, pos_id: Any, instrument_id=None) -> Optional[Any]:  # PositionId type -> Optional[Order]
         """
@@ -1138,6 +1182,20 @@ class PaxgXautGridStrategy(Strategy):
             self.log.warning(
                 f"Rebalance correction too small to trade "
                 f"({correction_notional:.2f} USDT rounds to 0 qty), skipping"
+            )
+            self._last_rebalance_ns = current_time
+            return
+
+        # Bybit minimum order notional check: actual notional = rounded_qty × current_price.
+        # This catches cases where qty > size_increment but value < 5 USDT (e.g. 0.001 XAUT
+        # at $2900 = $2.90 which passes the size_increment check but is rejected by Bybit).
+        ref_price = xaut_price if leg_name == "XAUT" else paxg_price
+        actual_order_notional = float(order.quantity) * ref_price
+        if actual_order_notional < self.config.min_order_notional_usdt:
+            self.log.info(
+                f"Rebalance correction notional too small "
+                f"({actual_order_notional:.2f} USDT < min {self.config.min_order_notional_usdt:.2f} USDT), "
+                f"skipping and setting full cooldown"
             )
             self._last_rebalance_ns = current_time
             return
@@ -1452,11 +1510,12 @@ class PaxgXautGridStrategy(Strategy):
                 if tracker.xaut_order_id:
                     self._safe_cancel_order(tracker.xaut_order_id)
 
-                # Retry closing the grid
+                # Retry closing the grid — force=True because this close was already
+                # approved once; we must not block the retry on P&L grounds.
                 del self.paired_close_orders[submit_time]
                 state = self.grid_state.get(tracker.level)
                 if state:
-                    self._close_grid(tracker.level, state)
+                    self._close_grid(tracker.level, state, force=True)
 
     def _safe_cancel_order(self, order_id: Any) -> None:
         """安全地取消订单（检查订单状态）"""
@@ -1467,6 +1526,73 @@ class PaxgXautGridStrategy(Strategy):
                 self.log.debug(f"Canceled order: {order_id}")
         except Exception as e:
             self.log.error(f"Error canceling order {order_id}: {e}")
+
+    def _find_position(self, pos_id: Any, instrument_id: InstrumentId):
+        """Resolve a position ID (real PositionId or string marker) to an open Position.
+
+        String markers ('MANUAL_OVERRIDE', 'DETECTED') are produced by
+        _sync_existing_positions() on restart.  For those cases we fall back to
+        the first open position found for the given instrument.
+
+        Returns None when no matching open position can be located.
+        """
+        if isinstance(pos_id, str):
+            for pos in self.cache.positions_open():
+                if pos.instrument_id == instrument_id:
+                    return pos
+            return None
+        pos = self.cache.position(pos_id)
+        return pos if pos and pos.is_open else None
+
+    def _estimate_net_pnl(self, level: float, state: GridPositionState) -> Optional[float]:
+        """Estimate the net P&L (USDT) for a grid level after all round-trip fees.
+
+        Formula:
+            gross_pnl  = Σ unrealised P&L per leg (using avg_px_open vs current mid)
+            total_fees = open_notional * taker_fee_rate * 2
+                         (open fees already paid  +  close fees about to be paid)
+            net_pnl    = gross_pnl - total_fees
+
+        Returns None when the P&L cannot be determined (e.g. position not in
+        cache).  Callers should allow the close to proceed when None is returned
+        rather than blocking it indefinitely.
+        """
+        paxg_mid = self._mid_price(self.paxg_bid, self.paxg_ask)
+        xaut_mid = self._mid_price(self.xaut_bid, self.xaut_ask)
+        if paxg_mid is None or xaut_mid is None:
+            return None
+
+        gross_pnl = 0.0
+        open_notional = 0.0  # sum of entry_price × qty across both legs
+
+        # PAXG leg
+        if state.paxg_pos_id is not None:
+            pos = self._find_position(state.paxg_pos_id, self.paxg_id)
+            if pos is None:
+                self.log.debug(f"_estimate_net_pnl: PAXG position not found for level={level}")
+                return None
+            entry = float(pos.avg_px_open)
+            qty   = float(pos.quantity)
+            gross_pnl    += (entry - paxg_mid) * qty if pos.is_short else (paxg_mid - entry) * qty
+            open_notional += entry * qty
+
+        # XAUT leg
+        if state.xaut_pos_id is not None:
+            pos = self._find_position(state.xaut_pos_id, self.xaut_id)
+            if pos is None:
+                self.log.debug(f"_estimate_net_pnl: XAUT position not found for level={level}")
+                return None
+            entry = float(pos.avg_px_open)
+            qty   = float(pos.quantity)
+            gross_pnl    += (entry - xaut_mid) * qty if pos.is_short else (xaut_mid - entry) * qty
+            open_notional += entry * qty
+
+        # Round-trip taker fees:
+        #   open fees  (already paid) = open_notional * taker_fee_rate
+        #   close fees (to be paid)   ≈ open_notional * taker_fee_rate  (prices move little)
+        total_fees = open_notional * self.config.taker_fee_rate * 2
+
+        return gross_pnl - total_fees
 
 
 # ==========================
