@@ -87,7 +87,7 @@ def create_live_config() -> TradingNodeConfig:
 
         # Trading parameters
         maker_offset_bps=1.0,            # 0.01% offset from mid price (tighter for fine grids)
-        order_timeout_sec=5.0,           # Order timeout in seconds
+        order_timeout_sec=15.0,          # Order timeout in seconds
         rebalance_threshold_bps=10.0,   # 0.10% rebalance threshold (matches grid spacing)
         extreme_spread_stop=0.010,       # 1.0% extreme spread stop (above highest grid at 0.5%)
 

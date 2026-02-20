@@ -6,7 +6,8 @@ PAXG-XAUT Grid Spread Arbitrage Strategy (NautilusTrader, Bybit single-venue)
 - 实时计算价差 spread = (PAXG - XAUT) / XAUT
 - 使用预设的网格 levels（例如 [0.001, 0.002, ...]）
 - 当 spread 超过某一档 level：高卖贵的、低买便宜的（成对开仓）
-  * 开仓使用市价单（market orders）确保快速成交，建立对冲仓位
+  * 开仓使用限价单（limit orders, GTC）作为 maker，降低手续费；
+    若超时未同时成交，自动取消未成交腿并平掉已成交腿（防止单腿风险）
 - 当 spread 回落到上一个 level 以下：平掉该档位的对冲仓位
   * 平仓使用限价单（limit orders）以更好的价格捕获利润
 - 杠杆建议在 Bybit 侧设置为约 10x，本策略通过 max_total_notional 控制整体风险敞口
@@ -69,10 +70,10 @@ class PaxgXautGridConfig(StrategyConfig, frozen=True):
     enable_high_levels: bool = True
 
     # maker 挂单相对中间价偏移（bps = 万分之一）
-    maker_offset_bps: float = 2.0  # 0.02%
+    maker_offset_bps: float = 1.0  # 0.01%
 
     # 挂单超时秒数（没成交就撤单重挂）
-    order_timeout_sec: float = 5.0
+    order_timeout_sec: float = 15.0
 
     # rebalance 阈值：两腿名义不平衡多少 bps 时，自动微调
     rebalance_threshold_bps: float = 20.0  # 0.20%
@@ -739,8 +740,13 @@ class PaxgXautGridStrategy(Strategy):
         """
         abs_spread = abs(spread)
 
-        # 1) 先处理“平仓条件”：spread 回到前一档以内 -> 平该档位
+        # 1) 先处理"平仓条件"：spread 回到前一档以内 -> 平该档位
+        # Limit to 1 NEW close pair per tick to avoid Bybit API rate-limit bursts.
+        # On restart, many levels may need closing simultaneously; without this guard
+        # all 14+ orders land in the same millisecond and most are rejected with
+        # "Too many visits. Exceeded the API Rate Limit."
         levels_sorted = sorted(self.config.grid_levels)
+        new_grids_closed = 0
         for i, level in enumerate(levels_sorted):
             state = self.grid_state[level]
             if not self._grid_has_position(state):
@@ -755,7 +761,14 @@ class PaxgXautGridStrategy(Strategy):
             else:
                 prev_level = levels_sorted[i - 1]
             if abs_spread < prev_level:
-                self.log.info(f"Closing grid level={level}, spread={spread:.4%}")
+                # Check if this level is already being closed (tracker exists)
+                already_closing = any(t.level == level for t in self.paired_close_orders.values())
+                if not already_closing:
+                    # Rate-limit: only submit 1 new close pair per tick
+                    if new_grids_closed >= 1:
+                        continue  # Will be picked up on the next tick
+                    self.log.info(f"Closing grid level={level}, spread={spread:.4%}")
+                    new_grids_closed += 1
                 self._close_grid(level, state)
 
         # 2) 再处理"开仓条件"：spread 超过某档且该档没有持仓/待处理订单 -> 开新对冲
@@ -817,18 +830,26 @@ class PaxgXautGridStrategy(Strategy):
         spread > 0: PAXG 贵 → 空 PAXG，多 XAUT
         spread < 0: XAUT 贵 → 空 XAUT，多 PAXG
 
-        使用市价单快速建立对冲仓位，确保两腿同时成交
+        使用限价单（maker）建立对冲仓位，降低手续费并避免滑点。
+
+        Imbalance protection (both legs):
+        - Both legs are submitted simultaneously as GTC limit orders.
+        - The PairedOrderTracker records their order IDs.
+        - _check_order_timeouts() fires every tick and inspects each tracker
+          after order_timeout_sec seconds:
+            * One leg filled, other not → cancel unfilled leg, close filled
+              leg via market IOC order to restore market-neutral state.
+            * Neither filled → cancel both orders and free pending_notional.
+        - This logic is identical for market and limit orders, so no changes
+          to the imbalance mechanism are required.
+
+        Price calculation:
+        - BUY  leg: min(ask, mid - maker_offset_bps) — passive bid inside spread
+        - SELL leg: max(bid, mid + maker_offset_bps) — passive offer inside spread
         """
-        paxg_price = self._mid_price(self.paxg_bid, self.paxg_ask)
-        xaut_price = self._mid_price(self.xaut_bid, self.xaut_ask)
-
-        if paxg_price is None or xaut_price is None:
+        if (self.paxg_bid is None or self.paxg_ask is None or
+                self.xaut_bid is None or self.xaut_ask is None):
             return
-
-        notional = self._get_level_notional(level)
-
-        paxg_qty = notional / paxg_price
-        xaut_qty = notional / xaut_price
 
         if spread > 0:
             # 空 PAXG，多 XAUT
@@ -843,17 +864,29 @@ class PaxgXautGridStrategy(Strategy):
             paxg_leg_tag = "PAXG_LONG"
             xaut_leg_tag = "XAUT_SHORT"
 
-        # 使用市价单确保立即成交，建立对冲仓位
-        paxg_order = self.order_factory.market(
+        # Compute maker limit prices using the existing helper
+        paxg_limit_price = self._maker_price(self.paxg_bid, self.paxg_ask, paxg_side)
+        xaut_limit_price = self._maker_price(self.xaut_bid, self.xaut_ask, xaut_side)
+
+        notional = self._get_level_notional(level)
+        paxg_qty = notional / paxg_limit_price
+        xaut_qty = notional / xaut_limit_price
+
+        # Submit GTC limit orders — stay open until filled or canceled by timeout
+        paxg_order = self.order_factory.limit(
             instrument_id=self.paxg_id,
             order_side=paxg_side,
             quantity=self.paxg.make_qty(paxg_qty),
+            price=self.paxg.make_price(paxg_limit_price),
+            time_in_force=TimeInForce.GTC,
         )
 
-        xaut_order = self.order_factory.market(
+        xaut_order = self.order_factory.limit(
             instrument_id=self.xaut_id,
             order_side=xaut_side,
             quantity=self.xaut.make_qty(xaut_qty),
+            price=self.xaut.make_price(xaut_limit_price),
+            time_in_force=TimeInForce.GTC,
         )
 
         # 提交订单
@@ -861,8 +894,9 @@ class PaxgXautGridStrategy(Strategy):
         self.submit_order(xaut_order)
 
         self.log.info(
-            f"Submitted MARKET orders for grid level={level}: "
-            f"{paxg_leg_tag} qty={paxg_qty:.6f}, {xaut_leg_tag} qty={xaut_qty:.6f}"
+            f"Submitted LIMIT orders for grid level={level}: "
+            f"{paxg_leg_tag} qty={paxg_qty:.6f} @ {paxg_limit_price:.4f}, "
+            f"{xaut_leg_tag} qty={xaut_qty:.6f} @ {xaut_limit_price:.4f}"
         )
 
         # 记录在途订单
@@ -1332,10 +1366,29 @@ class PaxgXautGridStrategy(Strategy):
     # ========== 挂单超时检查 ==========
     def _check_order_timeouts(self) -> None:
         """
-        检查配对订单是否出现部分成交：
-        - 开仓使用市价单，通常会立即成交，超时主要作为安全机制
-        - 如果一侧成交但另一侧超时未成交，则取消未成交订单并平掉已成交的仓位
-        - 防止累积单边持仓风险
+        Primary imbalance protection for limit open orders.
+
+        Since opening positions now uses GTC limit orders, this method is the
+        main guard against one-sided (naked) exposure:
+
+        - Called on every quote tick via on_quote_tick().
+        - After order_timeout_sec seconds have elapsed since submission,
+          inspects each PairedOrderTracker for fill status:
+
+            PAXG filled, XAUT not filled:
+                Cancel XAUT limit order.
+                Close PAXG position via market IOC (restore market neutrality).
+
+            XAUT filled, PAXG not filled:
+                Cancel PAXG limit order.
+                Close XAUT position via market IOC (restore market neutrality).
+
+            Neither filled (price moved away from both limit prices):
+                Cancel both limit orders; release pending_notional.
+                Grid level is free to re-trigger on the next tick.
+
+        The strategy will re-attempt the grid on the next tick where
+        abs_spread > level, using refreshed bid/ask prices.
         """
         if not self.paired_orders:
             return
