@@ -73,7 +73,7 @@ class PaxgXautGridConfig(StrategyConfig, frozen=True):
     maker_offset_bps: float = 1.0  # 0.01%
 
     # 挂单超时秒数（没成交就撤单重挂）
-    order_timeout_sec: float = 15.0
+    order_timeout_sec: float = 60.0
 
     # rebalance 阈值：两腿名义不平衡多少 bps 时，自动微调
     rebalance_threshold_bps: float = 20.0  # 0.20%
@@ -198,6 +198,12 @@ class PaxgXautGridStrategy(Strategy):
 
         # Track rebalance correction order IDs so fill/reject/cancel events are handled
         self._rebalance_order_ids: set = set()
+
+        # Per-level retry cooldown: after a pair failure/rejection, block re-opening
+        # the same level for 30 seconds to prevent the infinite re-open loop.
+        # Key: grid level, Value: earliest timestamp (ns) at which the level may reopen.
+        self._level_retry_after: Dict[float, int] = {}
+        self._level_retry_cooldown_ns: int = 30_000_000_000  # 30 seconds
 
     # ========== 生命周期 ==========
     def on_start(self) -> None:
@@ -571,6 +577,13 @@ class PaxgXautGridStrategy(Strategy):
                 self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
                 self.log.info(f"Order failure cleanup, pending_notional={self.pending_notional:.2f}")
                 del self.paired_orders[submit_time]
+                # Block this level from re-opening immediately (prevents tight retry loop)
+                self._level_retry_after[tracker.level] = (
+                    self.clock.timestamp_ns() + self._level_retry_cooldown_ns
+                )
+                self.log.info(
+                    f"Level={tracker.level} retry cooldown set for 30s after order failure"
+                )
                 break
             elif tracker.xaut_order_id == order_id:
                 notional = self._get_level_notional(tracker.level)
@@ -591,6 +604,13 @@ class PaxgXautGridStrategy(Strategy):
                 self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
                 self.log.info(f"Order failure cleanup, pending_notional={self.pending_notional:.2f}")
                 del self.paired_orders[submit_time]
+                # Block this level from re-opening immediately (prevents tight retry loop)
+                self._level_retry_after[tracker.level] = (
+                    self.clock.timestamp_ns() + self._level_retry_cooldown_ns
+                )
+                self.log.info(
+                    f"Level={tracker.level} retry cooldown set for 30s after order failure"
+                )
                 break
 
     def on_order_filled(self, event) -> None:
@@ -787,6 +807,11 @@ class PaxgXautGridStrategy(Strategy):
 
             # 检查是否已有pending订单 - 防止重复提交
             if self._grid_has_pending_orders(level):
+                continue
+
+            # Respect per-level retry cooldown after a pair failure/rejection
+            retry_after = self._level_retry_after.get(level, 0)
+            if self.clock.timestamp_ns() < retry_after:
                 continue
 
             if abs_spread > level:
@@ -1369,17 +1394,25 @@ class PaxgXautGridStrategy(Strategy):
 
     def _maker_price(self, bid: float, ask: float, side: OrderSide) -> float:
         """
+        Compute a passive maker limit price that stays inside (or at) the bid-ask spread.
+
         maker_offset_bps > 0:
-        - 买单：略低于 ask
-        - 卖单：略高于 bid
+        - BUY  leg: mid - offset, floored at bid  → at worst equals the best bid
+        - SELL leg: mid + offset, capped  at ask  → at worst equals the best ask
+
+        The bounds are critical: the previous formula used min(ask, ...) for BUY
+        and max(bid, ...) for SELL, which placed orders OUTSIDE the spread
+        (BUY below bid, SELL above ask) in tight markets.  That caused the SELL
+        leg to fill while the BUY leg sat unfilled indefinitely, producing a
+        one-directional (short-only) position.
         """
         mid = (bid + ask) / 2.0
         offset = self.config.maker_offset_bps / 10_000.0 * mid
 
         if side == OrderSide.BUY:
-            return min(ask, mid - offset)
+            return max(bid, mid - offset)   # never below best bid
         else:
-            return max(bid, mid + offset)
+            return min(ask, mid + offset)   # never above best ask
 
     def _get_bid_ask(self, inst: InstrumentId) -> Tuple[Optional[float], Optional[float]]:
         if inst == self.paxg_id:

@@ -87,7 +87,7 @@ def create_live_config() -> TradingNodeConfig:
 
         # Trading parameters
         maker_offset_bps=1.0,            # 0.01% offset from mid price (tighter for fine grids)
-        order_timeout_sec=15.0,          # Order timeout in seconds
+        order_timeout_sec=60.0,          # Order timeout in seconds
         rebalance_threshold_bps=10.0,   # 0.10% rebalance threshold (matches grid spacing)
         extreme_spread_stop=0.010,       # 1.0% extreme spread stop (above highest grid at 0.5%)
 
@@ -161,7 +161,7 @@ def create_live_config() -> TradingNodeConfig:
     # Execution engine configuration
     exec_engine_config = LiveExecEngineConfig(
         reconciliation=True,  # Enable position reconciliation
-        reconciliation_lookback_mins=1440,  # 24 hours
+        reconciliation_lookback_mins=30,  # 30 minutes — avoid phantom positions from messy prior-run history
         snapshot_orders=True,
         snapshot_positions=True,
         snapshot_positions_interval_secs=300.0,  # 5 minutes
