@@ -560,7 +560,9 @@ class PaxgXautGridStrategy(Strategy):
                     self.log.warning(f"XAUT already filled, closing XAUT position for level={tracker.level}")
                     state = self.grid_state.get(tracker.level)
                     if state and state.xaut_pos_id:
-                        self._close_position(state.xaut_pos_id)
+                        correction_order = self._close_position(state.xaut_pos_id)
+                        if correction_order is not None:
+                            self._rebalance_order_ids.add(correction_order.client_order_id)
                         state.xaut_pos_id = None
                 else:
                     # XAUT 还没成交，取消它
@@ -578,7 +580,9 @@ class PaxgXautGridStrategy(Strategy):
                     self.log.warning(f"PAXG already filled, closing PAXG position for level={tracker.level}")
                     state = self.grid_state.get(tracker.level)
                     if state and state.paxg_pos_id:
-                        self._close_position(state.paxg_pos_id)
+                        correction_order = self._close_position(state.paxg_pos_id)
+                        if correction_order is not None:
+                            self._rebalance_order_ids.add(correction_order.client_order_id)
                         state.paxg_pos_id = None
                 else:
                     # PAXG 还没成交，取消它
@@ -1086,6 +1090,26 @@ class PaxgXautGridStrategy(Strategy):
 
         A 60-second cooldown prevents submitting correction orders on every tick.
         """
+        # --- Guard: skip while any open-pair orders are still in flight ---
+        # During the initial fill window one leg fills before the other, making the
+        # portfolio look like a 100% imbalance (e.g. paxg_notional=0, xaut_notional=145).
+        # Without this guard the rebalancer submits a correction market order immediately,
+        # creating an unintended directional position on top of the still-pending leg.
+        # We wait until ALL open pairs have settled (both legs filled or timed out).
+        #
+        # Also skip while any imbalance-correction or rebalancer market orders are in flight.
+        # Race window: _check_order_timeouts removes a pair from paired_orders and then
+        # calls _close_position(). Between that removal and the close-order fill the
+        # portfolio still shows an imbalanced position but paired_orders is already empty.
+        # Tracking those close orders in _rebalance_order_ids plugs this race window.
+        if self.paired_orders or self.working_orders or self._rebalance_order_ids:
+            self.log.debug(
+                f"Rebalance skipped: {len(self.paired_orders)} open pair(s) / "
+                f"{len(self.working_orders)} working order(s) / "
+                f"{len(self._rebalance_order_ids)} correction order(s) still pending"
+            )
+            return
+
         # --- Measure current leg notionals via portfolio.net_exposure() ---
         # Using net_exposure() avoids double-counting when NautilusTrader holds both
         # EXTERNAL (reconciled) and internal positions simultaneously for the same instrument.
@@ -1423,7 +1447,12 @@ class PaxgXautGridStrategy(Strategy):
                 # 平掉已成交的 PAXG 仓位
                 state = self.grid_state.get(tracker.level)
                 if state and state.paxg_pos_id:
-                    self._close_position(state.paxg_pos_id)
+                    correction_order = self._close_position(state.paxg_pos_id)
+                    if correction_order is not None:
+                        # Track this close order so the rebalancer guard blocks
+                        # until the market close order fills (plugs the race window
+                        # between paired_orders removal and the close-order fill).
+                        self._rebalance_order_ids.add(correction_order.client_order_id)
                     state.paxg_pos_id = None
                 # PAXG成交了，但配对失败，需要从pending中扣除全部（因为XAUT没成交，不会进入total）
                 # 注意：PAXG成交时已经在on_order_filled中等待配对，这里只需要清理pending
@@ -1442,7 +1471,9 @@ class PaxgXautGridStrategy(Strategy):
                 # 平掉已成交的 XAUT 仓位
                 state = self.grid_state.get(tracker.level)
                 if state and state.xaut_pos_id:
-                    self._close_position(state.xaut_pos_id)
+                    correction_order = self._close_position(state.xaut_pos_id)
+                    if correction_order is not None:
+                        self._rebalance_order_ids.add(correction_order.client_order_id)
                     state.xaut_pos_id = None
                 # XAUT成交了，但配对失败，需要从pending中扣除全部
                 self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
