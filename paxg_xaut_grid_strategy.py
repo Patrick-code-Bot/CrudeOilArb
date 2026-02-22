@@ -1045,15 +1045,21 @@ class PaxgXautGridStrategy(Strategy):
 
     def _close_position(self, pos_id: Any, instrument_id=None) -> Optional[Any]:  # PositionId type -> Optional[Order]
         """
-        使用市价单平仓，确保立即成交
-        Close positions with MARKET orders to ensure immediate execution
+        Close positions with GTC LIMIT (maker) orders to earn maker rebates.
 
-        FIX #1: Changed from limit orders to market orders to prevent positions
-        from staying open when limit orders don't fill.
+        Using limit orders for closes is safe because:
+        - reduce_only=True guarantees the order only closes the existing position
+        - The position is already hedged (market-neutral), so waiting for fill
+          does not create directional risk
+        - Maker rebate (-0.01%) vs taker fee (+0.055%) saves ~0.065% per leg,
+          or ~0.13% round-trip, which exceeds the 0.10% grid step profit
 
-        FIX #2: Handle string markers (MANUAL_OVERRIDE, DETECTED) from position sync.
+        If an order fails to fill within order_timeout_sec, the timeout handler
+        (_check_close_order_timeouts) cancels and resubmits at the new market price.
+
+        Handle string markers (FILLED, DETECTED) from position sync:
         These are placeholders and don't correspond to actual PositionId objects.
-        When pos_id is a string, we find and close the first open position for the instrument.
+        When pos_id is a string, find and close the first open position for the instrument.
         """
         # Check if pos_id is a string marker (not a real PositionId)
         if isinstance(pos_id, str):
@@ -1092,16 +1098,38 @@ class PaxgXautGridStrategy(Strategy):
         side = OrderSide.SELL if pos.is_long else OrderSide.BUY
         qty = pos.quantity
 
-        # Use MARKET order instead of LIMIT order for guaranteed execution
-        close_order = self.order_factory.market(
+        # Get current bid/ask for this instrument to compute maker price
+        bid, ask = self._get_bid_ask(inst)
+        if bid is None or ask is None:
+            # Fallback to market order if quotes unavailable
+            self.log.warning(f"No quotes for {inst}, falling back to MARKET close order")
+            close_order = self.order_factory.market(
+                instrument_id=inst,
+                order_side=side,
+                quantity=instrument.make_qty(float(qty)),
+                time_in_force=TimeInForce.IOC,
+                reduce_only=True,
+            )
+            self.submit_order(close_order)
+            self.log.info(f"Submitted MARKET close order for {inst}, side={side}, qty={qty}")
+            return close_order
+
+        # Limit maker price: passive inside the spread to earn maker rebate
+        limit_price = self._maker_price(bid, ask, side)
+
+        close_order = self.order_factory.limit(
             instrument_id=inst,
             order_side=side,
             quantity=instrument.make_qty(float(qty)),
-            time_in_force=TimeInForce.IOC,
-            reduce_only=True,  # Important: only reduce position, don't reverse
+            price=instrument.make_price(limit_price),
+            time_in_force=TimeInForce.GTC,
+            reduce_only=True,  # Only reduce existing position, never reverse
         )
         self.submit_order(close_order)
-        self.log.info(f"Submitted MARKET close order for {inst}, side={side}, qty={qty}")
+        self.log.info(
+            f"Submitted LIMIT close order for {inst}, side={side}, "
+            f"qty={qty}, price={limit_price:.4f} (bid={bid:.4f}, ask={ask:.4f})"
+        )
 
         return close_order
 
