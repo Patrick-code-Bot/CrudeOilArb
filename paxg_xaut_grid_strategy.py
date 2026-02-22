@@ -681,13 +681,13 @@ class PaxgXautGridStrategy(Strategy):
             return
 
         if leg == "PAXG_LONG":
-            state.paxg_pos_id = pos.id if pos is not None else None
+            state.paxg_pos_id = pos.id if pos is not None else "FILLED"
         elif leg == "PAXG_SHORT":
-            state.paxg_pos_id = pos.id if pos is not None else None
+            state.paxg_pos_id = pos.id if pos is not None else "FILLED"
         elif leg == "XAUT_LONG":
-            state.xaut_pos_id = pos.id if pos is not None else None
+            state.xaut_pos_id = pos.id if pos is not None else "FILLED"
         elif leg == "XAUT_SHORT":
-            state.xaut_pos_id = pos.id if pos is not None else None
+            state.xaut_pos_id = pos.id if pos is not None else "FILLED"
 
         # Clean up tracker immediately when both orders filled AND positions are set
         # This prevents the race condition while ensuring positions are tracked
@@ -893,29 +893,30 @@ class PaxgXautGridStrategy(Strategy):
             paxg_leg_tag = "PAXG_LONG"
             xaut_leg_tag = "XAUT_SHORT"
 
-        # Compute maker limit prices using the existing helper
-        paxg_limit_price = self._maker_price(self.paxg_bid, self.paxg_ask, paxg_side)
-        xaut_limit_price = self._maker_price(self.xaut_bid, self.xaut_ask, xaut_side)
+        # Use mid price for quantity calculation (market orders fill at best available)
+        paxg_mid = self._mid_price(self.paxg_bid, self.paxg_ask)
+        xaut_mid = self._mid_price(self.xaut_bid, self.xaut_ask)
 
         notional = self._get_level_notional(level)
-        paxg_qty = notional / paxg_limit_price
-        xaut_qty = notional / xaut_limit_price
+        paxg_qty = notional / paxg_mid
+        xaut_qty = notional / xaut_mid
 
-        # Submit GTC limit orders — stay open until filled or canceled by timeout
-        paxg_order = self.order_factory.limit(
+        # Submit IOC market orders — both legs fill immediately, preventing imbalanced fills.
+        # Using market orders guarantees simultaneous execution on both legs, which is critical
+        # for a market-neutral strategy. GTC limit orders caused chronic one-leg fills because
+        # PAXG has lower liquidity than XAUT and the limit price rarely crossed.
+        paxg_order = self.order_factory.market(
             instrument_id=self.paxg_id,
             order_side=paxg_side,
             quantity=self.paxg.make_qty(paxg_qty),
-            price=self.paxg.make_price(paxg_limit_price),
-            time_in_force=TimeInForce.GTC,
+            time_in_force=TimeInForce.IOC,
         )
 
-        xaut_order = self.order_factory.limit(
+        xaut_order = self.order_factory.market(
             instrument_id=self.xaut_id,
             order_side=xaut_side,
             quantity=self.xaut.make_qty(xaut_qty),
-            price=self.xaut.make_price(xaut_limit_price),
-            time_in_force=TimeInForce.GTC,
+            time_in_force=TimeInForce.IOC,
         )
 
         # 提交订单
@@ -923,9 +924,9 @@ class PaxgXautGridStrategy(Strategy):
         self.submit_order(xaut_order)
 
         self.log.info(
-            f"Submitted LIMIT orders for grid level={level}: "
-            f"{paxg_leg_tag} qty={paxg_qty:.6f} @ {paxg_limit_price:.4f}, "
-            f"{xaut_leg_tag} qty={xaut_qty:.6f} @ {xaut_limit_price:.4f}"
+            f"Submitted MARKET orders for grid level={level}: "
+            f"{paxg_leg_tag} qty={paxg_qty:.6f} (mid={paxg_mid:.4f}), "
+            f"{xaut_leg_tag} qty={xaut_qty:.6f} (mid={xaut_mid:.4f})"
         )
 
         # 记录在途订单
