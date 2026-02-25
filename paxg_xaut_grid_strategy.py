@@ -1156,11 +1156,12 @@ class PaxgXautGridStrategy(Strategy):
         # calls _close_position(). Between that removal and the close-order fill the
         # portfolio still shows an imbalanced position but paired_orders is already empty.
         # Tracking those close orders in _rebalance_order_ids plugs this race window.
-        if self.paired_orders or self.working_orders or self._rebalance_order_ids:
+        if self.paired_orders or self.working_orders or self._rebalance_order_ids or self.paired_close_orders:
             self.log.debug(
                 f"Rebalance skipped: {len(self.paired_orders)} open pair(s) / "
                 f"{len(self.working_orders)} working order(s) / "
-                f"{len(self._rebalance_order_ids)} correction order(s) still pending"
+                f"{len(self._rebalance_order_ids)} correction order(s) / "
+                f"{len(self.paired_close_orders)} close order(s) still pending"
             )
             return
 
@@ -1369,15 +1370,27 @@ class PaxgXautGridStrategy(Strategy):
         if actual_total > 0:
             imbalance = abs(actual_paxg_notional - actual_xaut_notional) / actual_total
             if imbalance > 0.20:  # 20% imbalance
-                self.log.error(
-                    f"🚨 CRITICAL IMBALANCE: {imbalance*100:.2f}% "
-                    f"(PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f}). "
-                    f"Forcing immediate rebalance correction."
-                )
-                # Reset the rebalance cooldown so _rebalance_if_needed() fires on
-                # the very next call (it is invoked right after this method returns
-                # in on_quote_tick(), so the correction order is submitted this tick).
-                self._last_rebalance_ns = 0
+                # If close orders are in-flight, the imbalance is transient (one leg
+                # filled, the other is still pending).  Forcing a rebalance here would
+                # open an unintended short/long on the already-closed leg.  Wait until
+                # paired_close_orders is empty before triggering a correction.
+                if self.paired_close_orders:
+                    self.log.warning(
+                        f"⚠️ Imbalance {imbalance*100:.2f}% detected "
+                        f"(PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f}) "
+                        f"but {len(self.paired_close_orders)} close order(s) still in-flight — "
+                        f"skipping forced rebalance to avoid unintended short position."
+                    )
+                else:
+                    self.log.error(
+                        f"🚨 CRITICAL IMBALANCE: {imbalance*100:.2f}% "
+                        f"(PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f}). "
+                        f"Forcing immediate rebalance correction."
+                    )
+                    # Reset the rebalance cooldown so _rebalance_if_needed() fires on
+                    # the very next call (it is invoked right after this method returns
+                    # in on_quote_tick(), so the correction order is submitted this tick).
+                    self._last_rebalance_ns = 0
 
     def _get_actual_position_notional(self, instrument_id: InstrumentId) -> float:
         """Get actual position notional from cache for a specific instrument."""
