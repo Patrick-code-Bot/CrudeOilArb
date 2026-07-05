@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-Live trading entry point for PAXG-XAUT Grid Strategy on Bybit
+Live trading entry point for BZ-CL Grid Strategy on Bybit
 
-This script initializes and runs the live trading node with the PAXG-XAUT grid strategy.
+This script initializes and runs the live trading node with the BZ-CL grid strategy.
 
 Usage:
     python run_live.py
@@ -29,7 +29,7 @@ from nautilus_trader.adapters.bybit.factories import (
 from nautilus_trader.live.node import TradingNode
 
 from config_live import create_live_config
-from paxg_xaut_grid_strategy import PaxgXautGridStrategy
+from bz_cl_grid_strategy import BzClGridStrategy
 
 
 # Global reference to the trading node for signal handling
@@ -140,7 +140,7 @@ async def main():
     global trading_node
 
     print("=" * 80)
-    print("PAXG-XAUT Grid Strategy - Live Trading")
+    print("BZ-CL Grid Strategy - Live Trading")
     print("=" * 80)
 
     # Check required environment variables
@@ -194,11 +194,11 @@ async def main():
         print("\n" + "=" * 80)
         print("🚀 Trading node started successfully!")
         print("=" * 80)
-        print("\nStrategy: PAXG-XAUT Grid Arbitrage")
+        print("\nStrategy: BZ-CL Grid Arbitrage")
         print(f"Venue: Bybit {'(Testnet)' if testnet else '(Live)'}")
         print("Instruments:")
-        print("  - PAXGUSDT-LINEAR")
-        print("  - XAUTUSDT-LINEAR")
+        print("  - BZUSDT-LINEAR")
+        print("  - CLUSDT-LINEAR")
         print("\nPress Ctrl+C to stop the trading node...")
         print("=" * 80 + "\n")
 

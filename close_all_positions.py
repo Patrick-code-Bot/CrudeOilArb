@@ -26,7 +26,7 @@ def main():
     print("BYBIT POSITION CLOSER - Emergency Position Cleanup")
     print("=" * 80)
     print()
-    print("⚠️  WARNING: This will close ALL open PAXG and XAUT positions!")
+    print("⚠️  WARNING: This will close ALL open BZ and CL positions!")
     print("⚠️  Market orders will be used for immediate execution.")
     print()
 
@@ -69,17 +69,17 @@ def main():
             print("No open positions found.")
             return
 
-        # Filter for PAXG and XAUT with non-zero size
+        # Filter for BZ and CL with non-zero size
         relevant_positions = []
         for pos in positions:
             symbol = pos.get('symbol', '')
             size = float(pos.get('size', 0))
 
-            if size > 0 and ('PAXG' in symbol or 'XAUT' in symbol):
+            if size > 0 and ('BZUSDT' in symbol or 'CLUSDT' in symbol):
                 relevant_positions.append(pos)
 
         if not relevant_positions:
-            print("No PAXG or XAUT positions with non-zero size found.")
+            print("No BZ or CL positions with non-zero size found.")
             return
 
         print(f"Found {len(relevant_positions)} position(s) to close:")
@@ -176,7 +176,7 @@ def main():
                 remaining_positions = verify_response['result']['list']
                 remaining_relevant = [
                     p for p in remaining_positions
-                    if float(p.get('size', 0)) > 0 and ('PAXG' in p.get('symbol', '') or 'XAUT' in p.get('symbol', ''))
+                    if float(p.get('size', 0)) > 0 and ('BZUSDT' in p.get('symbol', '') or 'CLUSDT' in p.get('symbol', ''))
                 ]
 
                 if not remaining_relevant:
@@ -188,7 +188,7 @@ def main():
 
         print()
         print("Please verify on Bybit UI that all positions are closed:")
-        print("https://www.bybit.com/trade/usdt/PAXGUSDT")
+        print("https://www.bybit.com/trade/usdt/BZUSDT")
         print()
         print("Then you can safely restart the strategy with the fixes.")
 
@@ -209,8 +209,8 @@ def main():
         print()
         print("=" * 80)
         print("Alternative: Close positions manually on Bybit UI")
-        print("https://www.bybit.com/trade/usdt/PAXGUSDT")
-        print("https://www.bybit.com/trade/usdt/XAUTUSDT")
+        print("https://www.bybit.com/trade/usdt/BZUSDT")
+        print("https://www.bybit.com/trade/usdt/CLUSDT")
         print("=" * 80)
         sys.exit(1)
 

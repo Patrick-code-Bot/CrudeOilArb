@@ -1,5 +1,5 @@
 """
-Live trading configuration for PAXG-XAUT Grid Strategy on Bybit
+Live trading configuration for BZ-CL Grid Strategy on Bybit
 """
 
 from decimal import Decimal
@@ -17,12 +17,12 @@ from nautilus_trader.config import (
 from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.trading.config import ImportableStrategyConfig
 
-from paxg_xaut_grid_strategy import PaxgXautGridConfig
+from bz_cl_grid_strategy import BzClGridConfig
 
 
 def create_live_config() -> TradingNodeConfig:
     """
-    Create live trading configuration for PAXG-XAUT grid strategy.
+    Create live trading configuration for BZ-CL grid strategy.
 
     Returns
     -------
@@ -31,19 +31,16 @@ def create_live_config() -> TradingNodeConfig:
     """
 
     # Strategy configuration
-    strategy_config = PaxgXautGridConfig(
+    strategy_config = BzClGridConfig(
         # Instrument IDs (Bybit perpetual swaps)
-        paxg_instrument_id="PAXGUSDT-LINEAR.BYBIT",
-        xaut_instrument_id="XAUTUSDT-LINEAR.BYBIT",
+        bz_instrument_id="BZUSDT-LINEAR.BYBIT",
+        cl_instrument_id="CLUSDT-LINEAR.BYBIT",
 
-        # Grid levels (price spread as percentage of XAUT price)
-        # Redesigned 2026-02-22: tighter spacing around the observed 0.3%-1.0% spread range.
-        # Observed live spread: ~0.70% (PAXG 5126, XAUT 5091).
-        # Old design had only 2 levels in 0.6%-1.0% range causing near-zero trade frequency.
-        # New design: 12 levels with uniform 0.10% steps from 0.10% to 1.20%, then wider
+        # Grid levels (price spread as percentage of CL price)
+        # Redesigned 2026-02-22: tighter spacing around the observed spread range.
+        # BZ (Brent) and CL (WTI) typically trade within a few percent of each other.
+        # Grid levels: 14 levels with uniform 0.10% steps from 0.10% to 1.20%, then wider
         # safety levels at 1.50%, 2.00%, 3.00% for tail-risk protection.
-        # At 0.70% spread: ~6 levels open (0.10-0.60%), level 0.70% triggers new trade,
-        # levels above 0.70% wait, and any reversion below opens close cycles.
         grid_levels=[
             0.0010,  # 0.10% - Step 1
             0.0020,  # 0.20% - Step 2
@@ -51,7 +48,7 @@ def create_live_config() -> TradingNodeConfig:
             0.0040,  # 0.40% - Step 4
             0.0050,  # 0.50% - Step 5
             0.0060,  # 0.60% - Step 6
-            0.0070,  # 0.70% - Step 7  ← near current spread
+            0.0070,  # 0.70% - Step 7
             0.0080,  # 0.80% - Step 8
             0.0090,  # 0.90% - Step 9
             0.0100,  # 1.00% - Step 10
@@ -69,7 +66,7 @@ def create_live_config() -> TradingNodeConfig:
         target_leverage=10.0,            # Target leverage (set on Bybit exchange)
 
         # Position weights for different grid levels (multiplier for base_notional_per_level)
-        # Redesigned 2026-02-22: uniform weighting for the active range, larger for tail levels.
+        # Uniform weighting for the active range, larger for tail levels.
         # base_notional_per_level=88.5 USDT per side.
         position_weights={
             0.0010: 0.5,  #  44.3 USDT per side →  88.6 USDT total per grid
@@ -105,7 +102,6 @@ def create_live_config() -> TradingNodeConfig:
         # Bybit doesn't report external positions to NautilusTrader.
         # Check Bybit position page and set to actual exposure.
         # Set to 0.0 when starting fresh with no positions.
-        # UPDATED 2026-02-22: Set to 0.0 - no positions on Bybit, starting fresh.
         initial_notional_override=0.0,
 
         # Strategy identification (required for multiple strategy instances)
@@ -114,8 +110,8 @@ def create_live_config() -> TradingNodeConfig:
 
     # Wrap strategy config in ImportableStrategyConfig
     importable_config = ImportableStrategyConfig(
-        strategy_path="paxg_xaut_grid_strategy:PaxgXautGridStrategy",
-        config_path="paxg_xaut_grid_strategy:PaxgXautGridConfig",
+        strategy_path="bz_cl_grid_strategy:BzClGridStrategy",
+        config_path="bz_cl_grid_strategy:BzClGridConfig",
         config=strategy_config.dict(),
     )
 
@@ -153,7 +149,7 @@ def create_live_config() -> TradingNodeConfig:
         log_level="INFO",
         log_level_file="INFO",  # Changed from DEBUG to INFO to reduce log size
         log_directory="logs",
-        log_file_name="paxg_xaut_grid",
+        log_file_name="bz_cl_grid",
         log_file_format="json",
         log_colors=True,
         bypass_logging=False,
@@ -203,7 +199,7 @@ if __name__ == "__main__":
     # Print configuration for verification
     config = create_live_config()
     print("=" * 80)
-    print("PAXG-XAUT Grid Strategy - Live Trading Configuration")
+    print("BZ-CL Grid Strategy - Live Trading Configuration")
     print("=" * 80)
     print(f"Trader ID: {config.trader_id}")
     print(f"Data Clients: {list(config.data_clients.keys())}")

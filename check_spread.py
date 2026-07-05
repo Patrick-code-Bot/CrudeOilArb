@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quick script to check current PAXG/XAUT spread on Bybit
+Quick script to check current BZ/CL spread on Bybit
 """
 import os
 import requests
@@ -34,29 +34,29 @@ def get_ticker(symbol):
         return None
 
 def main():
-    print("Fetching PAXG and XAUT ticker data from Bybit...\n")
+    print("Fetching BZ and CL ticker data from Bybit...\n")
 
-    paxg = get_ticker("PAXGUSDT")
-    xaut = get_ticker("XAUTUSDT")
+    bz = get_ticker("BZUSDT")
+    cl = get_ticker("CLUSDT")
 
-    if not paxg or not xaut:
+    if not bz or not cl:
         print("Failed to fetch ticker data", file=sys.stderr)
         return 1
 
-    print(f"PAXG: Bid={paxg['bid']:.2f}, Ask={paxg['ask']:.2f}, Last={paxg['last']:.2f}")
-    print(f"XAUT: Bid={xaut['bid']:.2f}, Ask={xaut['ask']:.2f}, Last={xaut['last']:.2f}")
+    print(f"BZ: Bid={bz['bid']:.2f}, Ask={bz['ask']:.2f}, Last={bz['last']:.2f}")
+    print(f"CL: Bid={cl['bid']:.2f}, Ask={cl['ask']:.2f}, Last={cl['last']:.2f}")
     print()
 
     # Calculate mid prices
-    paxg_mid = (paxg['bid'] + paxg['ask']) / 2
-    xaut_mid = (xaut['bid'] + xaut['ask']) / 2
+    bz_mid = (bz['bid'] + bz['ask']) / 2
+    cl_mid = (cl['bid'] + cl['ask']) / 2
 
     # Calculate spread
-    spread = (paxg_mid - xaut_mid) / xaut_mid
+    spread = (bz_mid - cl_mid) / cl_mid
     abs_spread = abs(spread)
 
-    print(f"PAXG Mid: {paxg_mid:.2f}")
-    print(f"XAUT Mid: {xaut_mid:.2f}")
+    print(f"BZ Mid: {bz_mid:.2f}")
+    print(f"CL Mid: {cl_mid:.2f}")
     print(f"Spread: {spread:.6f} ({spread * 100:.4f}%)")
     print(f"Abs Spread: {abs_spread:.6f} ({abs_spread * 100:.4f}%)")
     print()
