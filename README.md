@@ -1,11 +1,11 @@
-# 🏆 GoldArb - PAXG/XAUT Grid Arbitrage Strategy
+# 🛢️ CrudeOilArb - BZ/CL Grid Arbitrage Strategy
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![NautilusTrader](https://img.shields.io/badge/NautilusTrader-1.221.0-green.svg)](https://nautilustrader.io/)
 [![License](https://img.shields.io/badge/License-LGPL--3.0-orange.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](Dockerfile)
 
-A high-frequency market-neutral spread arbitrage trading strategy for PAXG/USDT and XAUT/USDT perpetual swaps on Bybit, built with the NautilusTrader algorithmic trading framework.
+A high-frequency market-neutral spread arbitrage trading strategy for BZ/USDT (Brent Crude) and CL/USDT (WTI Crude) perpetual swaps on Bybit, built with the NautilusTrader algorithmic trading framework.
 
 ---
 
@@ -32,10 +32,10 @@ A high-frequency market-neutral spread arbitrage trading strategy for PAXG/USDT 
 
 ## 🎯 Overview
 
-GoldArb is an automated trading strategy that exploits price spreads between two highly correlated gold-backed tokens:
+CrudeOilArb is an automated trading strategy that exploits price spreads between two highly correlated crude oil futures:
 
-- **PAXG (Pax Gold)**: ERC-20 token backed by physical gold
-- **XAUT (Tether Gold)**: ERC-20 token backed by physical gold
+- **BZ (Brent Crude)**: Brent crude oil futures perpetual swap
+- **CL (WTI Crude)**: West Texas Intermediate crude oil futures perpetual swap
 
 By trading perpetual swap contracts on Bybit, the strategy captures arbitrage opportunities while maintaining a market-neutral hedged position.
 
@@ -69,13 +69,13 @@ By trading perpetual swap contracts on Bybit, the strategy captures arbitrage op
 
 1. **Spread Calculation**
    ```
-   spread = (PAXG_price - XAUT_price) / XAUT_price
+   spread = (BZ_price - CL_price) / CL_price
    ```
 
 2. **Grid Entry Logic**
    - When `spread > grid_level`: Open hedged position
-     - SELL PAXG (expensive asset)
-     - BUY XAUT (cheap asset)
+     - SELL BZ (expensive asset)
+     - BUY CL (cheap asset)
    - Each grid level represents a specific spread threshold (e.g., 0.10%, 0.20%, etc.)
 
 3. **Grid Exit Logic**
@@ -83,32 +83,32 @@ By trading perpetual swap contracts on Bybit, the strategy captures arbitrage op
    - Profit is locked in from spread convergence
 
 4. **Order Execution**
-   - All orders are **limit orders** (maker)
-   - Orders placed with small offset from mid-price for better fill rates
-   - 5-second timeout for unfilled orders (cancel and resubmit)
+   - Opening orders are **market orders** (fast execution)
+   - Closing orders are **limit orders** (maker rebates)
+   - 60-second timeout for unfilled orders (cancel and resubmit)
 
 ### Example Trade Flow
 
 ```
 1. Initial State:
-   PAXG = $2,700.00
-   XAUT = $2,695.00
-   Spread = 0.185% (above 0.10% grid)
+   BZ = $72.00
+   CL = $68.80
+   Spread = 4.65% (above grid levels)
 
 2. Entry:
-   → SELL 0.023 PAXG @ $2,700.00
-   → BUY  0.023 XAUT @ $2,695.00
-   → Position opened at 0.10% grid level
+   → SELL 1.5 BZ @ $72.00
+   → BUY  1.5 CL @ $68.80
+   → Position opened at grid level
 
 3. Spread Converges:
-   PAXG = $2,697.00
-   XAUT = $2,696.00
-   Spread = 0.037% (below 0.10% grid)
+   BZ = $71.00
+   CL = $68.50
+   Spread = 3.65% (below previous level)
 
 4. Exit:
-   → BUY  0.023 PAXG @ $2,697.00 (close short)
-   → SELL 0.023 XAUT @ $2,696.00 (close long)
-   → Profit: ~$0.046 per unit (minus fees)
+   → BUY  1.5 BZ @ $71.00 (close short)
+   → SELL 1.5 CL @ $68.50 (close long)
+   → Profit realized from spread convergence
 ```
 
 ---
@@ -126,18 +126,20 @@ By trading perpetual swap contracts on Bybit, the strategy captures arbitrage op
 ### Project Structure
 
 ```
-GoldArb/
-├── paxg_xaut_grid_strategy.py   # Core strategy implementation
-├── config_live.py                # Live trading configuration
-├── run_live.py                   # Main entry point
-├── requirements.txt              # Python dependencies
-├── Dockerfile                    # Docker image definition
-├── .env.example                  # Environment template
-├── .dockerignore                 # Docker ignore patterns
-├── logs/                         # Trading logs (auto-created)
-│   └── paxg_xaut_grid.json
-├── data/                         # Historical data (optional)
-└── README.md                     # This file
+CrudeOilArb/
+├── bz_cl_grid_strategy.py        # Core strategy implementation
+├── config_live.py                 # Live trading configuration
+├── run_live.py                    # Main entry point
+├── check_spread.py                # Utility to check current spread
+├── close_all_positions.py         # Emergency position closer
+├── requirements.txt               # Python dependencies
+├── Dockerfile                     # Docker image definition
+├── .env.example                   # Environment template
+├── .dockerignore                  # Docker ignore patterns
+├── logs/                          # Trading logs (auto-created)
+│   └── bz_cl_grid.json
+├── data/                          # Historical data (optional)
+└── README.md                      # This file
 ```
 
 ### System Requirements
@@ -166,8 +168,8 @@ Docker provides the easiest and most reliable deployment method.
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/Patrick-code-Bot/GoldArb.git
-   cd GoldArb
+   git clone https://github.com/Patrick-code-Bot/CrudeOilArb.git
+   cd CrudeOilArb
    ```
 
 2. **Configure environment variables**
@@ -186,23 +188,23 @@ Docker provides the easiest and most reliable deployment method.
 3. **Build and run with Docker Compose** (if using orchestration)
    ```bash
    cd ../trading-deployment
-   docker-compose up -d goldarb
+   docker-compose up -d crudeoilarb
    ```
 
    Or **run standalone**:
    ```bash
-   docker build -t goldarb .
+   docker build -t crudeoilarb .
    docker run -d \
-     --name goldarb \
+     --name crudeoilarb \
      --env-file .env \
      -v $(pwd)/logs:/app/logs \
      --restart unless-stopped \
-     goldarb
+     crudeoilarb
    ```
 
 4. **Monitor logs**
    ```bash
-   docker logs -f goldarb
+   docker logs -f crudeoilarb
    ```
 
 #### Docker Features
@@ -226,8 +228,8 @@ For development or testing without Docker:
 
 2. **Clone and install dependencies**
    ```bash
-   git clone https://github.com/Patrick-code-Bot/GoldArb.git
-   cd GoldArb
+   git clone https://github.com/Patrick-code-Bot/CrudeOilArb.git
+   cd CrudeOilArb
    pip install -r requirements.txt
    ```
 
@@ -251,10 +253,10 @@ For development or testing without Docker:
 Edit `config_live.py` to customize the trading parameters:
 
 ```python
-strategy_config = PaxgXautGridConfig(
+strategy_config = BzClGridConfig(
     # Instruments (Bybit LINEAR perpetual swaps)
-    paxg_instrument_id="PAXGUSDT-LINEAR.BYBIT",
-    xaut_instrument_id="XAUTUSDT-LINEAR.BYBIT",
+    bz_instrument_id="BZUSDT-LINEAR.BYBIT",
+    cl_instrument_id="CLUSDT-LINEAR.BYBIT",
 
     # Grid levels (spread as decimal percentage)
     grid_levels=[
@@ -264,20 +266,26 @@ strategy_config = PaxgXautGridConfig(
         0.0040,  # 0.40% spread
         0.0050,  # 0.50% spread
         0.0060,  # 0.60% spread
+        0.0070,  # 0.70% spread
         0.0080,  # 0.80% spread
+        0.0090,  # 0.90% spread
         0.0100,  # 1.00% spread
+        0.0120,  # 1.20% spread
+        0.0150,  # 1.50% spread
+        0.0200,  # 2.00% spread
+        0.0300,  # 3.00% spread
     ],
 
     # Risk management
-    base_notional_per_level=100.0,   # USDT per grid level
-    max_total_notional=1000.0,       # Maximum total exposure (USDT)
+    base_notional_per_level=88.5,    # USDT per grid level
+    max_total_notional=3000.0,       # Maximum total exposure (USDT)
     target_leverage=10.0,            # Target leverage (for reference)
 
     # Trading parameters
-    maker_offset_bps=2.0,            # 0.02% price offset for limit orders
-    order_timeout_sec=5.0,           # Cancel and resubmit after 5s
-    rebalance_threshold_bps=20.0,   # 0.20% imbalance triggers rebalance
-    extreme_spread_stop=0.015,       # 1.5% spread triggers emergency stop
+    maker_offset_bps=1.0,            # 0.01% price offset for limit orders
+    order_timeout_sec=60.0,          # Cancel and resubmit after 60s
+    rebalance_threshold_bps=10.0,    # 0.10% imbalance triggers rebalance
+    extreme_spread_stop=0.035,       # 3.5% spread triggers emergency stop
 
     # Features
     enable_high_levels=True,         # Allow upper grid levels
@@ -298,19 +306,19 @@ target_leverage=5.0             # 5x leverage
 
 #### 🟡 Moderate (Default)
 ```python
-base_notional_per_level=100.0   # $100 per level
-max_total_notional=1000.0       # $1,000 max exposure
+base_notional_per_level=88.5    # $88.5 per level
+max_total_notional=3000.0       # $3,000 max exposure
 target_leverage=10.0            # 10x leverage
 ```
-**Recommended Capital**: $2,000+ USDT
+**Recommended Capital**: $2,500+ USDT
 
 #### 🔴 Aggressive (Experienced)
 ```python
 base_notional_per_level=500.0   # $500 per level
-max_total_notional=5000.0       # $5,000 max exposure
+max_total_notional=10000.0      # $10,000 max exposure
 target_leverage=15.0            # 15x leverage
 ```
-**Recommended Capital**: $10,000+ USDT
+**Recommended Capital**: $15,000+ USDT
 
 ---
 
@@ -321,7 +329,7 @@ target_leverage=15.0            # 15x leverage
 #### Live Trading Mode
 ```bash
 # Using Docker
-docker start goldarb
+docker start crudeoilarb
 
 # Using Python
 python run_live.py
@@ -330,7 +338,7 @@ python run_live.py
 Expected output:
 ```
 ================================================================================
-PAXG-XAUT Grid Strategy - Live Trading
+BZ-CL Grid Strategy - Live Trading
 ================================================================================
 ✅ Running in LIVE mode
 ================================================================================
@@ -345,14 +353,38 @@ PAXG-XAUT Grid Strategy - Live Trading
 🚀 Trading node started successfully!
 ================================================================================
 
-Strategy: PAXG-XAUT Grid Arbitrage
+Strategy: BZ-CL Grid Arbitrage
 Venue: Bybit (Live)
 Instruments:
-  - PAXGUSDT-LINEAR.BYBIT
-  - XAUTUSDT-LINEAR.BYBIT
+  - BZUSDT-LINEAR
+  - CLUSDT-LINEAR
 
 Press Ctrl+C to stop the trading node...
 ================================================================================
+```
+
+#### Check Current Spread
+```bash
+python check_spread.py
+```
+
+Output:
+```
+Fetching BZ and CL ticker data from Bybit...
+
+BZ: Bid=72.07, Ask=72.09, Last=72.07
+CL: Bid=68.83, Ask=68.84, Last=68.84
+
+BZ Mid: 72.08
+CL Mid: 68.84
+Spread: 0.047142 (4.7142%)
+Abs Spread: 0.047142 (4.7142%)
+
+Grid Level Analysis:
+------------------------------------------------------------
+Level  0.10% (prev= 0.00%): SHOULD OPEN
+Level  0.20% (prev= 0.10%): SHOULD OPEN
+...
 ```
 
 #### Testnet Mode
@@ -373,7 +405,7 @@ For risk-free testing:
 **Graceful Shutdown**:
 ```bash
 # Docker
-docker stop goldarb
+docker stop crudeoilarb
 
 # Python (Press Ctrl+C in terminal)
 ```
@@ -384,11 +416,6 @@ The strategy will:
 - Save state snapshots
 - Shut down cleanly
 
-**Force Stop** (not recommended):
-```bash
-docker kill goldarb
-```
-
 ---
 
 ## 📈 Monitoring
@@ -398,18 +425,18 @@ docker kill goldarb
 #### Docker Logs
 ```bash
 # Follow live logs
-docker logs -f goldarb
+docker logs -f crudeoilarb
 
 # Last 100 lines
-docker logs --tail 100 goldarb
+docker logs --tail 100 crudeoilarb
 
 # Search for errors
-docker logs goldarb 2>&1 | grep ERROR
+docker logs crudeoilarb 2>&1 | grep ERROR
 ```
 
 #### Log Files
 
-Location: `logs/paxg_xaut_grid.json`
+Location: `logs/bz_cl_grid.json`
 
 Format: Structured JSON with fields:
 - `timestamp`: ISO 8601 timestamp
@@ -418,24 +445,13 @@ Format: Structured JSON with fields:
 - `component`: Strategy, ExecEngine, DataClient, etc.
 - `message`: Log message
 
-Example:
-```json
-{
-  "timestamp": "2025-12-15T12:48:45.480095413Z",
-  "trader_id": "TRADER-001",
-  "level": "INFO",
-  "component": "PaxgXautGridStrategy",
-  "message": "OrderFilled(instrument_id=XAUTUSDT-LINEAR.BYBIT, ...)"
-}
-```
-
 ### Key Metrics
 
 Monitor these critical metrics:
 
 | Metric | Description | Alert Threshold |
 |--------|-------------|-----------------|
-| **Spread** | Current PAXG-XAUT price difference | > 1.5% (extreme) |
+| **Spread** | Current BZ-CL price difference | > 3.5% (extreme) |
 | **Active Grids** | Number of open grid positions | Approaching max |
 | **Total Notional** | Current exposure vs max limit | > 90% of max |
 | **Order Fill Rate** | % of orders filled | < 80% |
@@ -445,15 +461,8 @@ Monitor these critical metrics:
 ### Bybit Web Interface
 
 Monitor positions and orders:
-- **Live**: [https://www.bybit.com/trade/usdt/PAXGUSDT](https://www.bybit.com/trade/usdt/PAXGUSDT)
-- **Testnet**: [https://testnet.bybit.com/trade/usdt/PAXGUSDT](https://testnet.bybit.com/trade/usdt/PAXGUSDT)
-
-Check:
-- Open positions
-- Order history
-- Account balance
-- Funding rates
-- Liquidation price
+- **Live**: [https://www.bybit.com/trade/usdt/BZUSDT](https://www.bybit.com/trade/usdt/BZUSDT)
+- **Testnet**: [https://testnet.bybit.com/trade/usdt/BZUSDT](https://testnet.bybit.com/trade/usdt/BZUSDT)
 
 ---
 
@@ -466,12 +475,12 @@ Check:
    - Prevents over-leveraging
 
 2. **Extreme Spread Stop**
-   - `extreme_spread_stop = 0.015` (1.5%)
+   - `extreme_spread_stop = 0.035` (3.5%)
    - Pauses strategy if spread becomes abnormal
    - Prevents trading during market dislocation
 
 3. **Order Timeouts**
-   - `order_timeout_sec = 5.0`
+   - `order_timeout_sec = 60.0`
    - Cancels stale orders
    - Ensures fresh pricing
 
@@ -480,10 +489,10 @@ Check:
    - Periodic snapshots every 5 minutes
    - Prevents state drift
 
-5. **Maker-Only Orders**
-   - All orders are limit orders
-   - Earns maker rebates
-   - Avoids paying taker fees
+5. **Paired Order Tracking**
+   - Detects imbalanced fills (one leg fills, other doesn't)
+   - Automatically closes naked positions
+   - Prevents directional exposure
 
 ### Operational Best Practices
 
@@ -496,83 +505,24 @@ Check:
 - [ ] Configure position size alerts on Bybit mobile app
 - [ ] Document emergency procedures
 
-#### Daily Operations
-
-- [ ] Check positions and P&L (morning/evening)
-- [ ] Review log files for warnings/errors
-- [ ] Monitor account balance and margin
-- [ ] Verify strategy is running (Docker health check)
-- [ ] Check for NautilusTrader updates
-
 #### Emergency Procedures
 
 If something goes wrong:
 
 1. **Stop the Strategy**
    ```bash
-   docker stop goldarb
+   docker stop crudeoilarb
    ```
 
-2. **Assess Positions**
-   - Log into Bybit
-   - Check open positions and orders
-   - Review account P&L
-
-3. **Manual Intervention** (if needed)
-   - Use Bybit web interface to manually close positions
-   - Cancel any stuck orders
-   - Document what happened
-
-4. **Review Logs**
+2. **Close All Positions**
    ```bash
-   tail -1000 logs/paxg_xaut_grid.json | grep ERROR
+   python close_all_positions.py
    ```
 
-5. **Restart** (only after resolving issues)
+3. **Review Logs**
    ```bash
-   docker start goldarb
+   tail -1000 logs/bz_cl_grid.json | grep ERROR
    ```
-
----
-
-## 📊 Performance
-
-### Expected Returns
-
-**Note**: Past performance does not guarantee future results.
-
-- **Target**: 0.5-2% weekly return (annualized 26-104%)
-- **Sharpe Ratio**: 2-4 (market neutral, low volatility)
-- **Max Drawdown**: < 10% (with proper risk management)
-- **Win Rate**: 75-85% (mean reversion strategy)
-
-### Fee Structure
-
-Bybit perpetual swaps (as of Dec 2025):
-- **Maker Fee**: -0.01% (rebate)
-- **Taker Fee**: +0.06%
-- **Funding Rate**: ±0.01% per 8 hours (variable)
-
-**Strategy uses maker orders only** → earning rebates on every fill!
-
-### Example P&L
-
-With default configuration (8 grid levels, $100 per level):
-
-```
-Grid Level: 0.10%
-Entry Spread: 0.185%
-Exit Spread: 0.037%
-Profit per Grid: ~$0.046 per unit × 0.023 units = $1.06
-Maker Rebate: -0.01% × $200 notional = $0.20
-Net P&L: $1.26 per grid close
-
-Daily Average: 5-10 grid closes
-Daily P&L: $6.30 - $12.60
-Monthly Estimate: $189 - $378 (19-38% ROI on $1000 capital)
-```
-
-*Results vary based on market volatility and spread behavior.*
 
 ---
 
@@ -598,14 +548,14 @@ Monthly Estimate: $189 - $378 (19-38% ROI on $1000 capital)
 **Diagnosis**:
 ```bash
 # Check if quote data is flowing
-docker logs goldarb 2>&1 | grep QuoteTick
+docker logs crudeoilarb 2>&1 | grep QuoteTick
 
 # Check spread warnings
-docker logs goldarb 2>&1 | grep spread
+docker logs crudeoilarb 2>&1 | grep spread
 ```
 
 **Solutions**:
-1. Verify instruments are correct: `PAXGUSDT-LINEAR.BYBIT`
+1. Verify instruments are correct: `BZUSDT-LINEAR.BYBIT`
 2. Check quote tick subscription is active
 3. Ensure spread is crossing grid levels
 4. Review `extreme_spread_stop` threshold
@@ -624,36 +574,9 @@ docker logs goldarb 2>&1 | grep spread
 
 **Solutions**:
 1. Check Bybit account balance
-2. Verify leverage is set to 10x on Bybit
+2. Verify leverage is set correctly on Bybit
 3. Review `maker_offset_bps` in config
 4. Check API rate limits
-
----
-
-#### Issue: Container keeps restarting
-
-**Diagnosis**:
-```bash
-docker ps -a | grep goldarb
-docker logs goldarb
-```
-
-**Solutions**:
-1. Check `.env` file has valid API credentials
-2. Verify network connectivity to Bybit
-3. Review startup logs for errors
-4. Check Docker resource limits (CPU/RAM)
-
----
-
-#### Issue: "Instruments not found in cache"
-
-**Cause**: Instrument IDs don't match Bybit's format.
-
-**Solution**:
-- Correct format: `PAXGUSDT-LINEAR.BYBIT` (not `-PERP`)
-- Update `config_live.py` if needed
-- Rebuild Docker image: `docker-compose build goldarb`
 
 ---
 
@@ -665,48 +588,6 @@ docker logs goldarb
 - **NautilusTrader Discord**: [Join Community](https://discord.gg/AUNMNnNDwP)
 - **Bybit API Docs**: [https://bybit-exchange.github.io/docs](https://bybit-exchange.github.io/docs)
 - **Bybit Support**: [https://www.bybit.com/en-US/help-center](https://www.bybit.com/en-US/help-center)
-
-#### Reporting Issues
-
-When reporting issues, include:
-1. Docker logs (`docker logs goldarb --tail 200`)
-2. Configuration file (redact API keys)
-3. Error messages
-4. Steps to reproduce
-5. Environment info (OS, Docker version)
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Here's how you can help:
-
-### Development Setup
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly (on testnet)
-5. Submit a pull request
-
-### Code Style
-
-- Follow PEP 8
-- Use type hints
-- Add docstrings for functions
-- Keep lines under 100 characters
-- Run `black` formatter
-
-### Testing
-
-Before submitting:
-```bash
-# Run on testnet
-BYBIT_TESTNET=true python run_live.py
-
-# Check logs for errors
-tail -f logs/paxg_xaut_grid.json
-```
 
 ---
 
@@ -727,7 +608,7 @@ tail -f logs/paxg_xaut_grid.json
 3. **Technical Risk**: Software bugs, API failures
 4. **Execution Risk**: Slippage, partial fills
 5. **Funding Risk**: Negative funding rates on perpetual swaps
-6. **Correlation Risk**: PAXG and XAUT correlation may break down
+6. **Correlation Risk**: BZ and CL correlation may break down
 
 ### Recommendations
 
@@ -752,8 +633,8 @@ See the [LICENSE](LICENSE) file for full license text.
 ## 📞 Contact
 
 - **GitHub**: [@Patrick-code-Bot](https://github.com/Patrick-code-Bot)
-- **Repository**: [GoldArb](https://github.com/Patrick-code-Bot/GoldArb)
-- **Issues**: [Report a bug](https://github.com/Patrick-code-Bot/GoldArb/issues)
+- **Repository**: [CrudeOilArb](https://github.com/Patrick-code-Bot/CrudeOilArb)
+- **Issues**: [Report a bug](https://github.com/Patrick-code-Bot/CrudeOilArb/issues)
 
 ---
 
