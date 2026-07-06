@@ -1,8 +1,8 @@
 # ============================================================================
-# Dockerfile for GoldArb (PAXG-XAUT Grid Trading Strategy)
+# Dockerfile for CrudeOilArb (BZ-CL Grid Trading Strategy)
 # ============================================================================
 # This creates a production-ready container for running the grid trading
-# strategy on Bybit for PAXG-XAUT pair.
+# strategy on Bybit for BZ/CL (Brent/WTI Crude Oil) pair.
 # ============================================================================
 
 # Stage 1: Base image with Python
@@ -10,7 +10,7 @@ FROM python:3.12-slim AS base
 
 # Metadata
 LABEL maintainer="patrick@project25"
-LABEL description="NautilusTrader PAXG-XAUT Grid Strategy on Bybit"
+LABEL description="NautilusTrader BZ-CL Grid Strategy on Bybit"
 LABEL version="1.0.0"
 
 # Set environment variables
@@ -58,7 +58,7 @@ RUN mkdir -p /app/logs /app/data /app/configs
 # Copy application code
 COPY run_live.py .
 COPY config_live.py .
-COPY paxg_xaut_grid_strategy.py .
+COPY bz_cl_grid_strategy.py .
 
 # Copy configuration template (will be overridden by env vars or volumes)
 COPY .env.example .
@@ -73,9 +73,6 @@ USER trader
 # Health check (checks if the process is running)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import sys; sys.exit(0)" || exit 1
-
-# Expose port for potential monitoring/metrics (optional)
-# EXPOSE 8080
 
 # Set default command
 CMD ["python", "run_live.py"]
