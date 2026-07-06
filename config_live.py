@@ -37,59 +37,50 @@ def create_live_config() -> TradingNodeConfig:
         cl_instrument_id="CLUSDT-LINEAR.BYBIT",
 
         # Grid levels (price spread as percentage of CL price)
-        # Redesigned 2026-02-22: tighter spacing around the observed spread range.
-        # BZ (Brent) and CL (WTI) typically trade within a few percent of each other.
-        # Grid levels: 14 levels with uniform 0.10% steps from 0.10% to 1.20%, then wider
-        # safety levels at 1.50%, 2.00%, 3.00% for tail-risk protection.
+        # Recalibrated 2026-07-06 from 53 days of hourly Bybit data (May 13 - Jul 6):
+        # BZ (Brent) carries a STRUCTURAL premium over CL (WTI) - spread ranged
+        # 1.69%-5.71% with mean 3.94%. The old 0.10%-3.00% levels (inherited from
+        # PAXG/XAUT) sat entirely below the spread and could never close.
+        # Active reversion zone is 4.0%-5.5%; most down-crossings at 4.50%
+        # (52 in 53 days). Spacing 0.20-0.25% clears the P90 hourly move (0.24%).
+        # See BZ_CL_SPREAD_ANALYSIS.pdf. Re-run the analysis monthly - the monthly
+        # mean drifted 3.85% -> 4.64% (May -> Jul), so these levels go stale.
         grid_levels=[
-            0.0010,  # 0.10% - Step 1
-            0.0020,  # 0.20% - Step 2
-            0.0030,  # 0.30% - Step 3
-            0.0040,  # 0.40% - Step 4
-            0.0050,  # 0.50% - Step 5
-            0.0060,  # 0.60% - Step 6
-            0.0070,  # 0.70% - Step 7
-            0.0080,  # 0.80% - Step 8
-            0.0090,  # 0.90% - Step 9
-            0.0100,  # 1.00% - Step 10
-            0.0120,  # 1.20% - Step 11
-            0.0150,  # 1.50% - Safety 1
-            0.0200,  # 2.00% - Safety 2
-            0.0300,  # 3.00% - Safety 3
+            0.0400,  # 4.00% - Step 1 (spread above this ~53% of the time)
+            0.0420,  # 4.20% - Step 2
+            0.0440,  # 4.40% - Step 3
+            0.0460,  # 4.60% - Step 4 (most active reversion zone 4.3%-4.8%)
+            0.0480,  # 4.80% - Step 5
+            0.0500,  # 5.00% - Step 6
+            0.0525,  # 5.25% - Tail level (P99 = 5.17%)
         ],
 
         # Risk management - $2500 capital, 10x leverage, 30% safety reserve
         # Base unit: 88.5 USDT per side (adjustable by position weights)
-        # Max total: 3000 USDT (all 14 levels fully open = 2867 USDT + 5% buffer)
+        # Max total: 1700 USDT (all 7 levels fully open = 1539.9 USDT + ~10% buffer)
         base_notional_per_level=88.5,    # USDT per side (base unit, scaled by weights)
-        max_total_notional=3000.0,       # Maximum total exposure (covers all 14 levels)
+        max_total_notional=1700.0,       # Maximum total exposure (covers all 7 levels)
         target_leverage=10.0,            # Target leverage (set on Bybit exchange)
 
         # Position weights for different grid levels (multiplier for base_notional_per_level)
-        # Uniform weighting for the active range, larger for tail levels.
+        # Light at the bottom of the range, heavier at wider (rarer) spreads.
         # base_notional_per_level=88.5 USDT per side.
+        # All 7 levels fully open = 2 x 88.5 x 8.7 = 1539.9 USDT total notional.
         position_weights={
-            0.0010: 0.5,  #  44.3 USDT per side →  88.6 USDT total per grid
-            0.0020: 0.6,  #  53.1 USDT per side → 106.2 USDT total per grid
-            0.0030: 0.7,  #  61.9 USDT per side → 123.8 USDT total per grid
-            0.0040: 0.8,  #  70.8 USDT per side → 141.6 USDT total per grid
-            0.0050: 0.9,  #  79.7 USDT per side → 159.3 USDT total per grid
-            0.0060: 1.0,  #  88.5 USDT per side → 177.0 USDT total per grid
-            0.0070: 1.0,  #  88.5 USDT per side → 177.0 USDT total per grid
-            0.0080: 1.1,  #  97.4 USDT per side → 194.7 USDT total per grid
-            0.0090: 1.1,  #  97.4 USDT per side → 194.7 USDT total per grid
-            0.0100: 1.2,  # 106.2 USDT per side → 212.4 USDT total per grid
-            0.0120: 1.3,  # 115.1 USDT per side → 230.1 USDT total per grid
-            0.0150: 1.5,  # 132.8 USDT per side → 265.5 USDT total per grid
-            0.0200: 2.0,  # 177.0 USDT per side → 354.0 USDT total per grid
-            0.0300: 2.5,  # 221.3 USDT per side → 442.5 USDT total per grid
+            0.0400: 0.6,  #  53.1 USDT per side → 106.2 USDT total per grid
+            0.0420: 0.8,  #  70.8 USDT per side → 141.6 USDT total per grid
+            0.0440: 1.0,  #  88.5 USDT per side → 177.0 USDT total per grid
+            0.0460: 1.2,  # 106.2 USDT per side → 212.4 USDT total per grid
+            0.0480: 1.4,  # 123.9 USDT per side → 247.8 USDT total per grid
+            0.0500: 1.7,  # 150.5 USDT per side → 301.0 USDT total per grid
+            0.0525: 2.0,  # 177.0 USDT per side → 354.0 USDT total per grid
         },
 
         # Trading parameters
         maker_offset_bps=1.0,            # 0.01% offset from mid price (tighter for fine grids)
         order_timeout_sec=60.0,          # Order timeout in seconds
-        rebalance_threshold_bps=10.0,   # 0.10% rebalance threshold (matches grid spacing)
-        extreme_spread_stop=0.035,       # 3.5% extreme spread stop (above highest grid at 3.0%)
+        rebalance_threshold_bps=10.0,   # 0.10% rebalance threshold
+        extreme_spread_stop=0.060,       # 6.0% extreme spread stop (53-day max was 5.71%)
 
         # Features
         enable_high_levels=True,
